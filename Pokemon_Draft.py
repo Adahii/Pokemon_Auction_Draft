@@ -198,7 +198,7 @@ def show_landing_page():
 
                 st.success(f"Game created! Code: **{code}**")
                 st.info("Share this code with players so they can join as viewers.")
-                st.experimental_rerun()  # jump into game view
+                st.rerun()  # jump into game view
 
     with col_join:
         st.subheader("Join a Game")
@@ -216,7 +216,7 @@ def show_landing_page():
                 st.session_state.game_code = join_code
                 st.session_state.is_host = False
                 st.success(f"Joined game **{join_code}** as viewer.")
-                st.experimental_rerun()
+                st.rerun()
 
 
 # ---------- UI: single game view ----------
@@ -235,13 +235,13 @@ def show_game_page(game_code: str, is_host: bool):
         if st.button("Back to Home"):
             st.session_state.game_code = None
             st.session_state.is_host = False
-            st.experimental_rerun()
+            st.rerun()
         return
 
     if st.button("Leave Game"):
         st.session_state.game_code = None
         st.session_state.is_host = False
-        st.experimental_rerun()
+        st.rerun()
 
     st.markdown("---")
 
@@ -350,7 +350,7 @@ def show_game_page(game_code: str, is_host: bool):
                             f"{current_nominator} has a full team. Advancing nominator..."
                         )
                         advance_nominator(game)
-                        st.experimental_rerun()
+                        st.rerun()
 
                     elif budgets[current_nominator] < 50:
                         st.info(
@@ -358,7 +358,7 @@ def show_game_page(game_code: str, is_host: bool):
                             "($50 needed). Advancing nominator..."
                         )
                         advance_nominator(game)
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         # Nomination with autocomplete from full Pokémon pool
                         if POKEMON_POOL:
@@ -401,7 +401,7 @@ def show_game_page(game_code: str, is_host: bool):
                                     f"{current_nominator} nominated {mon_name} "
                                     f"with opening bid ${opening_bid}."
                                 )
-                                st.experimental_rerun()
+                                st.rerun()
                 else:
                     mon_name = game["current_pokemon"]
                     current_bid = game["current_bid"]
@@ -450,7 +450,7 @@ def show_game_page(game_code: str, is_host: bool):
                             game["log"].append(
                                 f"{bidder} bids ${new_bid} on {mon_name}."
                             )
-                            st.experimental_rerun()
+                            st.rerun()
 
                     if st.button("Close bidding & assign Pokémon", type="primary"):
                         winner = game["current_bidder"]
@@ -478,7 +478,7 @@ def show_game_page(game_code: str, is_host: bool):
                             else:
                                 advance_nominator(game)
 
-                            st.experimental_rerun()
+                            st.rerun()
 
         st.markdown("### Log")
         for entry in reversed(game["log"][-15:]):
