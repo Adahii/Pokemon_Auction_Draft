@@ -128,7 +128,7 @@ def everyone_full():
 
 init_state()
 
-st.title("Pokémon Auction Draft (Wolfey-style Round Robin)")
+st.title("Pokémon Auction Draft")
 
 # ---------- Sidebar: Setup ----------
 
@@ -439,3 +439,4 @@ else:
                         else:
                             st.write("Empty")
             st.markdown("---")
+
