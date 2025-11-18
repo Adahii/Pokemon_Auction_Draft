@@ -22,14 +22,12 @@ def init_state():
         st.session_state.current_bidder = None
         st.session_state.log = []
         st.session_state.draft_finished = False
-        st.session_state.pokemon_pool = []  # filled from PokeAPI
+        st.session_state.pokemon_pool = []      # list of names from PokeAPI
+        st.session_state.pokemon_id_map = {}    # name (lowercase) -> numeric id
 
 
 def pokemon_slug(name: str) -> str:
-    """
-    Convert a Pokémon name to a Pokemondb sprite slug.
-    We assume names like 'charizard', 'mr-mime', 'tapu-koko', etc.
-    """
+    """Slug function only used as a fallback if ID lookup fails."""
     slug = name.strip().lower()
     slug = slug.replace("♀", "-f").replace("♂", "-m")
     slug = re.sub(r"[.']", "", slug)
@@ -38,14 +36,28 @@ def pokemon_slug(name: str) -> str:
 
 
 def pokemon_image_url(name: str) -> str:
+    """
+    Primary: use PokeAPI numeric ID -> GitHub sprites.
+    Fallback: try Pokemondb slug (for any weird manual entries).
+    """
+    name_key = name.strip().lower()
+    id_map = st.session_state.get("pokemon_id_map", {})
+    poke_id = id_map.get(name_key)
+
+    if poke_id:
+        # PokeAPI sprite set (safe for programmatic use)
+        return f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/{poke_id}.png"
+
+    # Fallback: slug-based URL (may or may not work)
     slug = pokemon_slug(name)
     return f"https://img.pokemondb.net/sprites/home/normal/{slug}.png"
 
 
-def fetch_pokemon_from_api() -> list:
+@st.cache_data(show_spinner=False)
+def fetch_pokemon_from_api():
     """
-    Fetch Pokémon names from PokeAPI.
-    Returns a list of names like 'pikachu', 'charizard', 'mr-mime', etc.
+    Fetch Pokémon names + numeric IDs from PokeAPI.
+    Returns (names_list, name_to_id_dict).
     """
     url = "https://pokeapi.co/api/v2/pokemon?limit=2000"
     try:
@@ -57,21 +69,34 @@ def fetch_pokemon_from_api() -> list:
             "Couldn't load Pokémon names from PokeAPI. "
             f"Reason: {e}. Autocomplete will be disabled."
         )
-        return []
+        return [], {}
 
     results = data.get("results", [])
     names = []
+    name_to_id = {}
+
     for entry in results:
         n = entry.get("name", "").strip()
-        if n:
-            names.append(n)
+        url = entry.get("url", "").strip()
+        if not n or not url:
+            continue
+
+        # URL looks like .../pokemon/25/
+        try:
+            poke_id = int(url.rstrip("/").split("/")[-1])
+        except ValueError:
+            continue
+
+        names.append(n)
+        name_to_id[n.lower()] = poke_id
 
     if not names:
         st.warning(
             "PokeAPI returned no Pokémon names. "
             "Autocomplete will be disabled."
         )
-    return names
+
+    return names, name_to_id
 
 
 def advance_nominator():
@@ -103,7 +128,7 @@ def everyone_full():
 
 init_state()
 
-st.title("Pokémon Auction Draft")
+st.title("Pokémon Auction Draft (Wolfey-style Round Robin)")
 
 # ---------- Sidebar: Setup ----------
 
@@ -132,7 +157,7 @@ if not st.session_state.draft_started:
         else:
             # Load Pokémon names from PokeAPI ONCE when starting the draft
             with st.spinner("Loading Pokémon names from PokeAPI..."):
-                pokemon_pool = fetch_pokemon_from_api()
+                pokemon_pool, name_to_id = fetch_pokemon_from_api()
 
             st.session_state.players = players
             st.session_state.starting_budget = starting_budget
@@ -147,6 +172,7 @@ if not st.session_state.draft_started:
             st.session_state.draft_started = True
             st.session_state.draft_finished = False
             st.session_state.pokemon_pool = pokemon_pool
+            st.session_state.pokemon_id_map = name_to_id
 else:
     st.sidebar.success("Draft is in progress.")
     if st.sidebar.button("Reset Draft"):
@@ -165,10 +191,11 @@ if not st.session_state.draft_started:
         1. Enter player names on the left, then click **Start Draft**.  
         2. The app will:
            - Pull **Pokémon names from PokeAPI** for autocomplete.  
+           - Use **PokeAPI sprites** so images work reliably on Streamlit Cloud.  
            - Cycle nominators in order.  
            - Auto-place a **$50 opening bid** from the nominator.  
            - Let you raise bids in **$25 increments** and close the auction.  
-           - Track budgets and show each player's party with images.  
+           - Track budgets and show each player's party.  
         3. When you're done, click **Download Excel** for a full draft sheet.
         """
     )
@@ -192,7 +219,11 @@ else:
                 "Slots max": [max_slots] * len(players),
             }
         )
-        st.dataframe(df_status, hide_index=True, use_container_width=True)
+        st.dataframe(
+            df_status,
+            hide_index=True,
+            width="stretch",   # instead of use_container_width
+        )
 
     with col_excel:
         st.markdown("### Export")
