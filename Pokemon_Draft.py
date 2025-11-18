@@ -3,54 +3,26 @@ import pandas as pd
 from io import BytesIO
 import re
 import requests
+import random
+import string
 
 st.set_page_config(page_title="Pokémon Auction Draft", layout="wide")
 
-# ---------- Helpers ----------
+# ---------- Global game store (in-memory, per server) ----------
 
-def init_state():
-    if "draft_started" not in st.session_state:
-        st.session_state.draft_started = False
-        st.session_state.players = []
-        st.session_state.starting_budget = 1000
-        st.session_state.max_slots = 6
-        st.session_state.budgets = {}
-        st.session_state.rosters = {}
-        st.session_state.current_nominator_index = 0
-        st.session_state.current_pokemon = None
-        st.session_state.current_bid = None
-        st.session_state.current_bidder = None
-        st.session_state.log = []
-        st.session_state.draft_finished = False
-        st.session_state.pokemon_pool = []      # list of names from PokeAPI
-        st.session_state.pokemon_id_map = {}    # name (lowercase) -> numeric id
+# code -> game dict
+GAMES = {}
 
+
+# ---------- Pokémon helpers ----------
 
 def pokemon_slug(name: str) -> str:
-    """Slug function only used as a fallback if ID lookup fails."""
+    """Fallback slug function if ID lookup fails."""
     slug = name.strip().lower()
     slug = slug.replace("♀", "-f").replace("♂", "-m")
     slug = re.sub(r"[.']", "", slug)
     slug = re.sub(r"\s+", "-", slug)
     return slug
-
-
-def pokemon_image_url(name: str) -> str:
-    """
-    Primary: use PokeAPI numeric ID -> GitHub sprites.
-    Fallback: try Pokemondb slug (for any weird manual entries).
-    """
-    name_key = name.strip().lower()
-    id_map = st.session_state.get("pokemon_id_map", {})
-    poke_id = id_map.get(name_key)
-
-    if poke_id:
-        # PokeAPI sprite set (safe for programmatic use)
-        return f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/{poke_id}.png"
-
-    # Fallback: slug-based URL (may or may not work)
-    slug = pokemon_slug(name)
-    return f"https://img.pokemondb.net/sprites/home/normal/{slug}.png"
 
 
 @st.cache_data(show_spinner=False)
@@ -99,113 +71,187 @@ def fetch_pokemon_from_api():
     return names, name_to_id
 
 
-def advance_nominator():
+POKEMON_POOL, POKEMON_ID_MAP = fetch_pokemon_from_api()
+
+
+def pokemon_image_url(name: str) -> str:
+    """
+    Primary: use PokeAPI numeric ID -> GitHub sprites.
+    Fallback: try Pokemondb slug (for any weird manual entries).
+    """
+    name_key = name.strip().lower()
+    poke_id = POKEMON_ID_MAP.get(name_key)
+
+    if poke_id:
+        # PokeAPI sprite set (safe for programmatic use)
+        return f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/{poke_id}.png"
+
+    # Fallback: slug-based URL (may or may not work)
+    slug = pokemon_slug(name)
+    return f"https://img.pokemondb.net/sprites/home/normal/{slug}.png"
+
+
+# ---------- Game helpers ----------
+
+def generate_game_code(length: int = 6) -> str:
+    chars = string.ascii_uppercase + string.digits
+    while True:
+        code = "".join(random.choice(chars) for _ in range(length))
+        if code not in GAMES:
+            return code
+
+
+def create_game(players, starting_budget: int, max_slots: int):
+    budgets = {p: starting_budget for p in players}
+    rosters = {p: [] for p in players}
+    return {
+        "players": players,
+        "starting_budget": starting_budget,
+        "max_slots": max_slots,
+        "budgets": budgets,
+        "rosters": rosters,
+        "current_nominator_index": 0,
+        "current_pokemon": None,
+        "current_bid": None,
+        "current_bidder": None,
+        "log": [],
+        "draft_finished": False,
+    }
+
+
+def advance_nominator(game):
     """Advance nominator to next player who can still participate."""
-    players = st.session_state.players
-    max_slots = st.session_state.max_slots
-    budgets = st.session_state.budgets
-    rosters = st.session_state.rosters
+    players = game["players"]
+    max_slots = game["max_slots"]
+    budgets = game["budgets"]
+    rosters = game["rosters"]
 
     for _ in range(len(players)):
-        st.session_state.current_nominator_index = (
-            st.session_state.current_nominator_index + 1
+        game["current_nominator_index"] = (
+            game["current_nominator_index"] + 1
         ) % len(players)
-        p = players[st.session_state.current_nominator_index]
+        p = players[game["current_nominator_index"]]
         if len(rosters[p]) < max_slots and budgets[p] >= 50:
             return
 
     # If we get here, no one can nominate anymore -> draft finished
-    st.session_state.draft_finished = True
+    game["draft_finished"] = True
 
 
-def everyone_full():
-    max_slots = st.session_state.max_slots
-    rosters = st.session_state.rosters
-    return all(len(rosters[p]) >= max_slots for p in st.session_state.players)
+def everyone_full(game) -> bool:
+    max_slots = game["max_slots"]
+    rosters = game["rosters"]
+    return all(len(rosters[p]) >= max_slots for p in game["players"])
 
 
-# ---------- Initialize ----------
+# ---------- Session-level state (per browser) ----------
 
-init_state()
+if "game_code" not in st.session_state:
+    st.session_state.game_code = None  # which game this user is attached to
+if "is_host" not in st.session_state:
+    st.session_state.is_host = False   # host or viewer
 
-st.title("Pokémon Auction Draft")
 
-# ---------- Sidebar: Setup ----------
+# ---------- UI: landing (Host / Join) ----------
 
-st.sidebar.header("Setup")
+def show_landing_page():
+    st.title("Pokémon Auction Draft")
 
-if not st.session_state.draft_started:
-    with st.sidebar.form("setup_form"):
-        player_names_text = st.text_area(
-            "Player names (one per line):",
-            value="Player 1\nPlayer 2\nPlayer 3\nPlayer 4",
-            height=120,
-        )
-
-        starting_budget = st.number_input(
-            "Starting budget", value=1000, min_value=100, step=50
-        )
-        max_slots = st.number_input(
-            "Max Pokémon per player", value=6, min_value=1, max_value=12, step=1
-        )
-        start_button = st.form_submit_button("Start Draft")
-
-    if start_button:
-        players = [p.strip() for p in player_names_text.splitlines() if p.strip()]
-        if len(players) < 2:
-            st.sidebar.error("You need at least 2 players.")
-        else:
-            # Load Pokémon names from PokeAPI ONCE when starting the draft
-            with st.spinner("Loading Pokémon names from PokeAPI..."):
-                pokemon_pool, name_to_id = fetch_pokemon_from_api()
-
-            st.session_state.players = players
-            st.session_state.starting_budget = starting_budget
-            st.session_state.max_slots = max_slots
-            st.session_state.budgets = {p: starting_budget for p in players}
-            st.session_state.rosters = {p: [] for p in players}
-            st.session_state.current_nominator_index = 0
-            st.session_state.current_pokemon = None
-            st.session_state.current_bid = None
-            st.session_state.current_bidder = None
-            st.session_state.log = []
-            st.session_state.draft_started = True
-            st.session_state.draft_finished = False
-            st.session_state.pokemon_pool = pokemon_pool
-            st.session_state.pokemon_id_map = name_to_id
-else:
-    st.sidebar.success("Draft is in progress.")
-    if st.sidebar.button("Reset Draft"):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        init_state()
-        st.rerun()
-
-# ---------- Main UI ----------
-
-if not st.session_state.draft_started:
     st.markdown(
-        """
-        ### How it works
-        
-        1. Enter player names on the left, then click **Start Draft**.  
-        2. The app will:
-           - Pull **Pokémon names from PokeAPI** for autocomplete.  
-           - Use **PokeAPI sprites** so images work reliably on Streamlit Cloud.  
-           - Cycle nominators in order.  
-           - Auto-place a **$50 opening bid** from the nominator.  
-           - Let you raise bids in **$25 increments** and close the auction.  
-           - Track budgets and show each player's party.  
-        3. When you're done, click **Download Excel** for a full draft sheet.
-        """
+        "Create a game as **host** (gets control of the draft), "
+        "or **join** an existing game with a code to watch live."
     )
-else:
-    players = st.session_state.players
-    budgets = st.session_state.budgets
-    rosters = st.session_state.rosters
-    max_slots = st.session_state.max_slots
 
-    # Top summary
+    col_host, col_join = st.columns(2)
+
+    with col_host:
+        st.subheader("Host a Game")
+
+        with st.form("host_form"):
+            player_names_text = st.text_area(
+                "Player names (one per line):",
+                value="Player 1\nPlayer 2\nPlayer 3\nPlayer 4",
+                height=120,
+            )
+            starting_budget = st.number_input(
+                "Starting budget", value=1000, min_value=100, step=50
+            )
+            max_slots = st.number_input(
+                "Max Pokémon per player",
+                value=6,
+                min_value=1,
+                max_value=12,
+                step=1,
+            )
+            host_submit = st.form_submit_button("Create Game")
+
+        if host_submit:
+            players = [p.strip() for p in player_names_text.splitlines() if p.strip()]
+            if len(players) < 2:
+                st.error("You need at least 2 players.")
+            else:
+                code = generate_game_code()
+                GAMES[code] = create_game(players, starting_budget, max_slots)
+
+                st.session_state.game_code = code
+                st.session_state.is_host = True
+
+                st.success(f"Game created! Code: **{code}**")
+                st.info("Share this code with players so they can join as viewers.")
+                st.experimental_rerun()  # jump into game view
+
+    with col_join:
+        st.subheader("Join a Game")
+
+        with st.form("join_form"):
+            join_code = st.text_input("Enter game code (e.g. A7Q2KD):").upper().strip()
+            join_submit = st.form_submit_button("Join Game")
+
+        if join_submit:
+            if not join_code:
+                st.error("Enter a game code.")
+            elif join_code not in GAMES:
+                st.error("No game found with that code. Check the code and try again.")
+            else:
+                st.session_state.game_code = join_code
+                st.session_state.is_host = False
+                st.success(f"Joined game **{join_code}** as viewer.")
+                st.experimental_rerun()
+
+
+# ---------- UI: single game view ----------
+
+def show_game_page(game_code: str, is_host: bool):
+    game = GAMES.get(game_code)
+
+    st.title(f"Game Code: {game_code}")
+    role = "Host (controls draft)" if is_host else "Viewer (read-only)"
+    st.caption(f"Role: **{role}**")
+
+    if game is None:
+        st.error(
+            "This game no longer exists (server may have restarted or code is invalid)."
+        )
+        if st.button("Back to Home"):
+            st.session_state.game_code = None
+            st.session_state.is_host = False
+            st.experimental_rerun()
+        return
+
+    if st.button("Leave Game"):
+        st.session_state.game_code = None
+        st.session_state.is_host = False
+        st.experimental_rerun()
+
+    st.markdown("---")
+
+    players = game["players"]
+    budgets = game["budgets"]
+    rosters = game["rosters"]
+    max_slots = game["max_slots"]
+
+    # ---------- Top: status + export ----------
+
     st.subheader("Draft Status")
 
     col_summary, col_excel = st.columns([3, 1])
@@ -222,22 +268,23 @@ else:
         st.dataframe(
             df_status,
             hide_index=True,
-            width="stretch",   # instead of use_container_width
+            width="stretch",
         )
 
     with col_excel:
         st.markdown("### Export")
 
-        def build_excel_data():
+        def build_excel_data(game_obj):
             rows = []
-            for p in players:
+            for p in game_obj["players"]:
                 row = {
                     "Player": p,
-                    "RemainingBudget": budgets[p],
+                    "RemainingBudget": game_obj["budgets"][p],
                 }
-                for i in range(max_slots):
-                    if i < len(rosters[p]):
-                        mon = rosters[p][i]
+                max_slots_local = game_obj["max_slots"]
+                for i in range(max_slots_local):
+                    if i < len(game_obj["rosters"][p]):
+                        mon = game_obj["rosters"][p][i]
                         row[f"Slot{i+1}_Pokemon"] = mon["name"]
                         row[f"Slot{i+1}_Price"] = mon["price"]
                     else:
@@ -246,7 +293,7 @@ else:
                 rows.append(row)
             return pd.DataFrame(rows)
 
-        excel_df = build_excel_data()
+        excel_df = build_excel_data(game)
         buffer = BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             excel_df.to_excel(writer, index=False, sheet_name="Draft")
@@ -255,7 +302,7 @@ else:
         st.download_button(
             label="Download Excel",
             data=buffer,
-            file_name="draft_results.xlsx",
+            file_name=f"draft_results_{game_code}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
@@ -267,153 +314,177 @@ else:
     with col_left:
         st.subheader("Nomination & Bidding")
 
-        if st.session_state.draft_finished or everyone_full():
+        if game["draft_finished"] or everyone_full(game):
             st.success("Draft finished! Everyone is full or cannot nominate anymore.")
         else:
-            current_nominator = players[st.session_state.current_nominator_index]
+            current_nominator = players[game["current_nominator_index"]]
 
-            if st.session_state.current_pokemon is None:
-                st.markdown(f"**Current nominator:** {current_nominator}")
+            if not is_host:
+                # VIEWER MODE (read-only)
+                st.info(f"Host is controlling this draft.\n\nCurrent nominator: **{current_nominator}**")
 
-                if len(rosters[current_nominator]) >= max_slots:
-                    st.info(
-                        f"{current_nominator} has a full team. Advancing nominator..."
-                    )
-                    advance_nominator()
-                    st.rerun()
-
-                elif budgets[current_nominator] < 50:
-                    st.info(
-                        f"{current_nominator} doesn't have enough money to nominate "
-                        "($50 needed). Advancing nominator..."
-                    )
-                    advance_nominator()
-                    st.rerun()
+                if game["current_pokemon"] is None:
+                    st.write("Waiting for host to nominate a Pokémon...")
                 else:
-                    pokemon_pool = st.session_state.pokemon_pool
+                    mon_name = game["current_pokemon"]
+                    current_bid = game["current_bid"]
+                    current_bidder = game["current_bidder"]
 
-                    if pokemon_pool:
-                        # Filter out already drafted mons from the pool
-                        drafted_mons = {
-                            mon["name"]
-                            for mons in rosters.values()
-                            for mon in mons
-                        }
-                        available_mons = [
-                            m for m in pokemon_pool if m not in drafted_mons
-                        ]
+                    st.markdown(f"### Auction: **{mon_name}**")
+                    st.markdown(
+                        f"Current bid: **${current_bid}** by **{current_bidder}**"
+                    )
+                    st.image(
+                        pokemon_image_url(mon_name),
+                        width=128,
+                        caption=mon_name,
+                    )
 
-                        if not available_mons:
-                            st.info("All Pokémon in the pool have been drafted.")
-                            nominated_mon = ""
-                        else:
-                            nominated_mon = st.selectbox(
-                                "Nominate a Pokémon (type to search):",
-                                options=sorted(available_mons),
-                                key="nominate_select",
-                            )
-                    else:
-                        # Fallback to manual input if API failed
-                        nominated_mon = st.text_input(
-                            "Nominate a Pokémon (text, e.g. 'landorus-therian', 'archaludon'):",
-                            key="nominate_input",
-                        )
-
-                    if st.button("Nominate", type="primary"):
-                        mon_name = nominated_mon.strip() if nominated_mon else ""
-                        if not mon_name:
-                            st.error("Select or enter a Pokémon name before nominating.")
-                        else:
-                            st.session_state.current_pokemon = mon_name
-                            opening_bid = min(50, budgets[current_nominator])
-                            st.session_state.current_bid = opening_bid
-                            st.session_state.current_bidder = current_nominator
-                            st.session_state.log.append(
-                                f"{current_nominator} nominated {mon_name} "
-                                f"with opening bid ${opening_bid}."
-                            )
-                            st.rerun()
             else:
-                mon_name = st.session_state.current_pokemon
-                current_bid = st.session_state.current_bid
-                current_bidder = st.session_state.current_bidder
+                # HOST MODE (full control)
+                if game["current_pokemon"] is None:
+                    st.markdown(f"**Current nominator:** {current_nominator}")
 
-                st.markdown(f"### Auction: **{mon_name}**")
-                st.markdown(
-                    f"Current bid: **${current_bid}** by **{current_bidder}**"
-                )
-
-                img_url = pokemon_image_url(mon_name)
-                st.image(img_url, width=128, caption=mon_name)
-
-                bidder = st.selectbox(
-                    "Bidder",
-                    options=players,
-                    index=players.index(current_bidder)
-                    if current_bidder in players
-                    else 0,
-                    key="bidder_select",
-                )
-
-                max_allowed = budgets[bidder]
-                min_bid = current_bid + 25  # $25 increments
-
-                if max_allowed < min_bid:
-                    st.info(
-                        f"{bidder} does not have enough money to outbid the current bid "
-                        f"(needs at least ${min_bid}, has ${max_allowed})."
-                    )
-                else:
-                    allowed_bids = list(range(min_bid, max_allowed + 1, 25))
-
-                    new_bid = st.selectbox(
-                        f"New bid for {bidder} (increments of $25)",
-                        options=allowed_bids,
-                        key="bid_amount",
-                    )
-
-                    if st.button("Place Bid"):
-                        st.session_state.current_bid = int(new_bid)
-                        st.session_state.current_bidder = bidder
-                        st.session_state.log.append(
-                            f"{bidder} bids ${new_bid} on {mon_name}."
+                    if len(rosters[current_nominator]) >= max_slots:
+                        st.info(
+                            f"{current_nominator} has a full team. Advancing nominator..."
                         )
-                        st.rerun()
+                        advance_nominator(game)
+                        st.experimental_rerun()
 
-                if st.button("Close bidding & assign Pokémon", type="primary"):
-                    winner = st.session_state.current_bidder
-                    price = st.session_state.current_bid
-
-                    if budgets[winner] < price:
-                        st.error(
-                            "Error: winner does not have enough budget "
-                            "(something went wrong)."
+                    elif budgets[current_nominator] < 50:
+                        st.info(
+                            f"{current_nominator} doesn't have enough money to nominate "
+                            "($50 needed). Advancing nominator..."
                         )
-                    elif len(rosters[winner]) >= max_slots:
-                        st.error("Error: winner already has a full team.")
+                        advance_nominator(game)
+                        st.experimental_rerun()
                     else:
-                        budgets[winner] -= price
-                        rosters[winner].append({"name": mon_name, "price": price})
-                        st.session_state.log.append(
-                            f"{mon_name} goes to {winner} for ${price}."
-                        )
-                        # clear current auction
-                        st.session_state.current_pokemon = None
-                        st.session_state.current_bid = None
-                        st.session_state.current_bidder = None
+                        # Nomination with autocomplete from full Pokémon pool
+                        if POKEMON_POOL:
+                            drafted_mons = {
+                                mon["name"]
+                                for mons in rosters.values()
+                                for mon in mons
+                            }
+                            available_mons = [
+                                m for m in POKEMON_POOL if m not in drafted_mons
+                            ]
 
-                        if everyone_full():
-                            st.session_state.draft_finished = True
+                            if not available_mons:
+                                st.info("All Pokémon in the pool have been drafted.")
+                                nominated_mon = ""
+                            else:
+                                nominated_mon = st.selectbox(
+                                    "Nominate a Pokémon (type to search):",
+                                    options=sorted(available_mons),
+                                    key="nominate_select",
+                                )
                         else:
-                            advance_nominator()
+                            nominated_mon = st.text_input(
+                                "Nominate a Pokémon (text, e.g. 'landorus-therian', 'archaludon'):",
+                                key="nominate_input",
+                            )
 
-                        st.rerun()
+                        if st.button("Nominate", type="primary"):
+                            mon_name = nominated_mon.strip() if nominated_mon else ""
+                            if not mon_name:
+                                st.error(
+                                    "Select or enter a Pokémon name before nominating."
+                                )
+                            else:
+                                game["current_pokemon"] = mon_name
+                                opening_bid = min(50, budgets[current_nominator])
+                                game["current_bid"] = opening_bid
+                                game["current_bidder"] = current_nominator
+                                game["log"].append(
+                                    f"{current_nominator} nominated {mon_name} "
+                                    f"with opening bid ${opening_bid}."
+                                )
+                                st.experimental_rerun()
+                else:
+                    mon_name = game["current_pokemon"]
+                    current_bid = game["current_bid"]
+                    current_bidder = game["current_bidder"]
+
+                    st.markdown(f"### Auction: **{mon_name}**")
+                    st.markdown(
+                        f"Current bid: **${current_bid}** by **{current_bidder}**"
+                    )
+
+                    st.image(
+                        pokemon_image_url(mon_name),
+                        width=128,
+                        caption=mon_name,
+                    )
+
+                    bidder = st.selectbox(
+                        "Bidder",
+                        options=players,
+                        index=players.index(current_bidder)
+                        if current_bidder in players
+                        else 0,
+                        key="bidder_select",
+                    )
+
+                    max_allowed = budgets[bidder]
+                    min_bid = current_bid + 25  # $25 increments
+
+                    if max_allowed < min_bid:
+                        st.info(
+                            f"{bidder} does not have enough money to outbid the current bid "
+                            f"(needs at least ${min_bid}, has ${max_allowed})."
+                        )
+                    else:
+                        allowed_bids = list(range(min_bid, max_allowed + 1, 25))
+
+                        new_bid = st.selectbox(
+                            f"New bid for {bidder} (increments of $25)",
+                            options=allowed_bids,
+                            key="bid_amount",
+                        )
+
+                        if st.button("Place Bid"):
+                            game["current_bid"] = int(new_bid)
+                            game["current_bidder"] = bidder
+                            game["log"].append(
+                                f"{bidder} bids ${new_bid} on {mon_name}."
+                            )
+                            st.experimental_rerun()
+
+                    if st.button("Close bidding & assign Pokémon", type="primary"):
+                        winner = game["current_bidder"]
+                        price = game["current_bid"]
+
+                        if budgets[winner] < price:
+                            st.error(
+                                "Error: winner does not have enough budget "
+                                "(something went wrong)."
+                            )
+                        elif len(rosters[winner]) >= max_slots:
+                            st.error("Error: winner already has a full team.")
+                        else:
+                            budgets[winner] -= price
+                            rosters[winner].append({"name": mon_name, "price": price})
+                            game["log"].append(
+                                f"{mon_name} goes to {winner} for ${price}."
+                            )
+                            game["current_pokemon"] = None
+                            game["current_bid"] = None
+                            game["current_bidder"] = None
+
+                            if everyone_full(game):
+                                game["draft_finished"] = True
+                            else:
+                                advance_nominator(game)
+
+                            st.experimental_rerun()
 
         st.markdown("### Log")
-        for entry in reversed(st.session_state.log[-15:]):
+        for entry in reversed(game["log"][-15:]):
             st.write("- " + entry)
 
-    # ---------- Right: Parties with graphics ----------
+    # ---------- Right: Parties ----------
     with col_right:
         st.subheader("Current Parties")
 
@@ -440,3 +511,10 @@ else:
                             st.write("Empty")
             st.markdown("---")
 
+
+# ---------- Main app routing ----------
+
+if st.session_state.game_code is None:
+    show_landing_page()
+else:
+    show_game_page(st.session_state.game_code, st.session_state.is_host)
