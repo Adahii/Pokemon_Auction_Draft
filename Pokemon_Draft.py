@@ -5,8 +5,12 @@ import re
 import requests
 import random
 import string
+from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Pokémon Auction Draft", layout="wide")
+
+# Auto-refresh every 2 seconds so host/viewers see updates from others
+st_autorefresh(interval=2000, key="auto_refresh")
 
 # ---------- Shared game store (persists across reruns & sessions) ----------
 
