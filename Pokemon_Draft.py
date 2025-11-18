@@ -99,6 +99,14 @@ def pokemon_image_url(name: str) -> str:
 
 # ---------- Game helpers ----------
 
+PLAYER_ICONS = [
+    "🔥", "💧", "🌿", "⚡", "🪨",
+    "❄️", "🌪️", "🌙", "☀️", "⭐",
+    "🐉", "🦊", "🐢", "🦅", "🐍",
+    "🦁", "🐧", "🦈", "🦖", "🐸",
+]
+
+
 def generate_game_code(length: int = 6) -> str:
     chars = string.ascii_uppercase + string.digits
     games = get_game_store()
@@ -108,15 +116,23 @@ def generate_game_code(length: int = 6) -> str:
             return code
 
 
-def create_game(players, starting_budget: int, max_slots: int):
-    budgets = {p: starting_budget for p in players}
-    rosters = {p: [] for p in players}
+def create_game(starting_budget: int, max_slots: int):
+    """
+    Create a new game in 'lobby' status.
+    Players will join via lobby; host does NOT add player names.
+    """
     return {
-        "players": players,
+        "status": "lobby",           # 'lobby' -> 'draft' -> 'finished'
         "starting_budget": starting_budget,
         "max_slots": max_slots,
-        "budgets": budgets,
-        "rosters": rosters,
+
+        "lobby_players": {},         # name -> icon
+
+        "players": [],               # frozen at draft start
+        "player_icons": {},          # name -> icon
+        "budgets": {},               # name -> $
+        "rosters": {},               # name -> list of mons
+
         "current_nominator_index": 0,
         "current_pokemon": None,
         "current_bid": None,
@@ -124,6 +140,30 @@ def create_game(players, starting_budget: int, max_slots: int):
         "log": [],
         "draft_finished": False,
     }
+
+
+def start_draft(game) -> bool:
+    """
+    Move from lobby to draft.
+    Returns True if started, False if not enough players.
+    """
+    lobby_players = game["lobby_players"]
+    if len(lobby_players) < 2:
+        return False
+
+    players = list(lobby_players.keys())
+    game["players"] = players
+    game["player_icons"] = dict(lobby_players)
+    game["budgets"] = {p: game["starting_budget"] for p in players}
+    game["rosters"] = {p: [] for p in players}
+    game["current_nominator_index"] = 0
+    game["current_pokemon"] = None
+    game["current_bid"] = None
+    game["current_bidder"] = None
+    game["log"] = []
+    game["draft_finished"] = False
+    game["status"] = "draft"
+    return True
 
 
 def advance_nominator(game):
@@ -157,6 +197,10 @@ if "game_code" not in st.session_state:
     st.session_state.game_code = None  # which game this user is attached to
 if "is_host" not in st.session_state:
     st.session_state.is_host = False   # host or viewer
+if "player_name" not in st.session_state:
+    st.session_state.player_name = None
+if "player_icon" not in st.session_state:
+    st.session_state.player_icon = None
 
 
 # ---------- UI: landing (Host / Join) ----------
@@ -166,20 +210,17 @@ def show_landing_page():
 
     st.markdown(
         "Create a game as **host** (gets control of the draft), "
-        "or **join** an existing game with a code to watch live."
+        "or **join** an existing game with a code to sit in the **lobby** "
+        "and choose your name + icon."
     )
 
     col_host, col_join = st.columns(2)
 
+    # ----- Host -----
     with col_host:
         st.subheader("Host a Game")
 
         with st.form("host_form"):
-            player_names_text = st.text_area(
-                "Player names (one per line):",
-                value="Player 1\nPlayer 2\nPlayer 3\nPlayer 4",
-                height=120,
-            )
             starting_budget = st.number_input(
                 "Starting budget", value=1000, min_value=100, step=50
             )
@@ -193,73 +234,124 @@ def show_landing_page():
             host_submit = st.form_submit_button("Create Game")
 
         if host_submit:
-            players = [p.strip() for p in player_names_text.splitlines() if p.strip()]
-            if len(players) < 2:
-                st.error("You need at least 2 players.")
-            else:
-                code = generate_game_code()
-                games = get_game_store()
-                games[code] = create_game(players, starting_budget, max_slots)
+            code = generate_game_code()
+            games = get_game_store()
+            games[code] = create_game(starting_budget, max_slots)
 
-                st.session_state.game_code = code
-                st.session_state.is_host = True
+            st.session_state.game_code = code
+            st.session_state.is_host = True
+            st.session_state.player_name = None
+            st.session_state.player_icon = None
 
-                st.success(f"Game created! Code: **{code}**")
-                st.info("Share this code with players so they can join as viewers.")
-                st.rerun()  # jump into game view
+            st.success(f"Game created! Code: **{code}**")
+            st.info("Share this code with players so they can join the lobby.")
+            st.rerun()  # jump into game view
 
+    # ----- Join -----
     with col_join:
         st.subheader("Join a Game")
 
         with st.form("join_form"):
             join_code = st.text_input("Enter game code (e.g. A7Q2KD):").upper().strip()
-            join_submit = st.form_submit_button("Join Game")
+            player_name = st.text_input("Your display name:")
+            icon = st.selectbox("Choose an icon:", PLAYER_ICONS, index=0)
+            join_submit = st.form_submit_button("Join Lobby")
 
         if join_submit:
             if not join_code:
                 st.error("Enter a game code.")
-            else:
-                games = get_game_store()
-                if join_code not in games:
-                    st.error("No game found with that code. Check the code and try again.")
-                else:
-                    st.session_state.game_code = join_code
-                    st.session_state.is_host = False
-                    st.success(f"Joined game **{join_code}** as viewer.")
-                    st.rerun()
+                return
 
+            games = get_game_store()
+            if join_code not in games:
+                st.error("No game found with that code. Check the code and try again.")
+                return
 
-# ---------- UI: single game view ----------
+            game = games[join_code]
 
-def show_game_page(game_code: str, is_host: bool):
-    games = get_game_store()
-    game = games.get(game_code)
+            # If draft already started, join as viewer (no lobby registration)
+            if game["status"] != "lobby":
+                st.session_state.game_code = join_code
+                st.session_state.is_host = False
+                st.session_state.player_name = None
+                st.session_state.player_icon = None
+                st.success(f"Joined game **{join_code}** as viewer.")
+                st.rerun()
+                return
 
-    st.title(f"Game Code: {game_code}")
-    role = "Host (controls draft)" if is_host else "Viewer (read-only)"
-    st.caption(f"Role: **{role}**")
+            # Lobby join (player)
+            if not player_name.strip():
+                st.error("Enter a display name to join as a player.")
+                return
 
-    if game is None:
-        st.error(
-            "This game no longer exists (server may have restarted or code is invalid)."
-        )
-        if st.button("Back to Home"):
-            st.session_state.game_code = None
+            if player_name in game["lobby_players"]:
+                st.error("That name is already taken in this lobby. Choose another.")
+                return
+
+            game["lobby_players"][player_name] = icon
+            st.session_state.game_code = join_code
             st.session_state.is_host = False
+            st.session_state.player_name = player_name
+            st.session_state.player_icon = icon
+
+            st.success(f"Joined lobby for **{join_code}** as {icon} **{player_name}**.")
             st.rerun()
-        return
 
-    if st.button("Leave Game"):
-        st.session_state.game_code = None
-        st.session_state.is_host = False
-        st.rerun()
 
-    st.markdown("---")
+# ---------- UI: Lobby ----------
 
+def show_lobby_view(game_code: str, is_host: bool, game: dict):
+    st.subheader("Lobby")
+
+    st.write(
+        f"Starting budget: **${game['starting_budget']}**  |  "
+        f"Max Pokémon per player: **{game['max_slots']}**"
+    )
+
+    lobby_players = game["lobby_players"]
+
+    if not lobby_players:
+        st.write("_No players have joined yet._")
+    else:
+        st.markdown("### Players in Lobby")
+        # Show in a grid
+        names = list(lobby_players.keys())
+        icons = [lobby_players[n] for n in names]
+        cols = st.columns(4)
+        for idx, (n, icon) in enumerate(zip(names, icons)):
+            with cols[idx % 4]:
+                st.markdown(f"{icon} **{n}**")
+
+    # Info for this client
+    if not is_host and st.session_state.player_name:
+        st.info(
+            f"You are {st.session_state.player_icon} **{st.session_state.player_name}** "
+            f"in this lobby. Waiting for host to start the draft."
+        )
+    elif not is_host:
+        st.info("You joined as a viewer. Waiting for host to start the draft.")
+
+    # Host controls
+    if is_host:
+        st.markdown("### Host Controls")
+
+        if st.button("Start Draft with Current Players"):
+            ok = start_draft(game)
+            if not ok:
+                st.error("You need at least 2 players in the lobby to start.")
+            else:
+                st.success("Draft started!")
+                st.rerun()
+
+
+# ---------- UI: Draft ----------
+
+def show_draft_view(game_code: str, is_host: bool, game: dict):
     players = game["players"]
     budgets = game["budgets"]
     rosters = game["rosters"]
     max_slots = game["max_slots"]
+    player_icons = game["player_icons"]
 
     # ---------- Top: status + export ----------
 
@@ -271,6 +363,7 @@ def show_game_page(game_code: str, is_host: bool):
         df_status = pd.DataFrame(
             {
                 "Player": players,
+                "Icon": [player_icons.get(p, "") for p in players],
                 "Remaining $": [budgets[p] for p in players],
                 "Slots used": [len(rosters[p]) for p in players],
                 "Slots max": [max_slots] * len(players),
@@ -290,6 +383,7 @@ def show_game_page(game_code: str, is_host: bool):
             for p in game_obj["players"]:
                 row = {
                     "Player": p,
+                    "Icon": game_obj["player_icons"].get(p, ""),
                     "RemainingBudget": game_obj["budgets"][p],
                 }
                 max_slots_local = game_obj["max_slots"]
@@ -329,12 +423,13 @@ def show_game_page(game_code: str, is_host: bool):
             st.success("Draft finished! Everyone is full or cannot nominate anymore.")
         else:
             current_nominator = players[game["current_nominator_index"]]
+            current_nominator_icon = player_icons.get(current_nominator, "")
 
             if not is_host:
                 # VIEWER MODE (read-only)
                 st.info(
                     "Host is controlling this draft.\n\n"
-                    f"Current nominator: **{current_nominator}**"
+                    f"Current nominator: {current_nominator_icon} **{current_nominator}**"
                 )
 
                 if game["current_pokemon"] is None:
@@ -343,10 +438,12 @@ def show_game_page(game_code: str, is_host: bool):
                     mon_name = game["current_pokemon"]
                     current_bid = game["current_bid"]
                     current_bidder = game["current_bidder"]
+                    current_bidder_icon = player_icons.get(current_bidder, "")
 
                     st.markdown(f"### Auction: **{mon_name}**")
                     st.markdown(
-                        f"Current bid: **${current_bid}** by **{current_bidder}**"
+                        f"Current bid: **${current_bid}** by "
+                        f"{current_bidder_icon} **{current_bidder}**"
                     )
                     st.image(
                         pokemon_image_url(mon_name),
@@ -357,7 +454,10 @@ def show_game_page(game_code: str, is_host: bool):
             else:
                 # HOST MODE (full control)
                 if game["current_pokemon"] is None:
-                    st.markdown(f"**Current nominator:** {current_nominator}")
+                    st.markdown(
+                        f"**Current nominator:** "
+                        f"{current_nominator_icon} **{current_nominator}**"
+                    )
 
                     if len(rosters[current_nominator]) >= max_slots:
                         st.info(
@@ -412,18 +512,20 @@ def show_game_page(game_code: str, is_host: bool):
                                 game["current_bid"] = opening_bid
                                 game["current_bidder"] = current_nominator
                                 game["log"].append(
-                                    f"{current_nominator} nominated {mon_name} "
-                                    f"with opening bid ${opening_bid}."
+                                    f"{current_nominator_icon} {current_nominator} "
+                                    f"nominated {mon_name} with opening bid ${opening_bid}."
                                 )
                                 st.rerun()
                 else:
                     mon_name = game["current_pokemon"]
                     current_bid = game["current_bid"]
                     current_bidder = game["current_bidder"]
+                    current_bidder_icon = player_icons.get(current_bidder, "")
 
                     st.markdown(f"### Auction: **{mon_name}**")
                     st.markdown(
-                        f"Current bid: **${current_bid}** by **{current_bidder}**"
+                        f"Current bid: **${current_bid}** by "
+                        f"{current_bidder_icon} **{current_bidder}**"
                     )
 
                     st.image(
@@ -462,13 +564,15 @@ def show_game_page(game_code: str, is_host: bool):
                             game["current_bid"] = int(new_bid)
                             game["current_bidder"] = bidder
                             game["log"].append(
-                                f"{bidder} bids ${new_bid} on {mon_name}."
+                                f"{game['player_icons'].get(bidder, '')} {bidder} "
+                                f"bids ${new_bid} on {mon_name}."
                             )
                             st.rerun()
 
                     if st.button("Close bidding & assign Pokémon", type="primary"):
                         winner = game["current_bidder"]
                         price = game["current_bid"]
+                        winner_icon = player_icons.get(winner, "")
 
                         if budgets[winner] < price:
                             st.error(
@@ -481,7 +585,8 @@ def show_game_page(game_code: str, is_host: bool):
                             budgets[winner] -= price
                             rosters[winner].append({"name": mon_name, "price": price})
                             game["log"].append(
-                                f"{mon_name} goes to {winner} for ${price}."
+                                f"{mon_name} goes to {winner_icon} {winner} "
+                                f"for ${price}."
                             )
                             game["current_pokemon"] = None
                             game["current_bid"] = None
@@ -503,8 +608,9 @@ def show_game_page(game_code: str, is_host: bool):
         st.subheader("Current Parties")
 
         for p in players:
+            icon = player_icons.get(p, "")
             st.markdown(
-                f"#### {p} – ${budgets[p]} left "
+                f"#### {icon} {p} – ${budgets[p]} left "
                 f"({len(rosters[p])}/{max_slots})"
             )
             mons = rosters[p]
@@ -524,6 +630,43 @@ def show_game_page(game_code: str, is_host: bool):
                         else:
                             st.write("Empty")
             st.markdown("---")
+
+
+# ---------- UI: single game wrapper ----------
+
+def show_game_page(game_code: str, is_host: bool):
+    games = get_game_store()
+    game = games.get(game_code)
+
+    st.title(f"Game Code: {game_code}")
+    role = "Host (controls draft)" if is_host else "Player/Viewer"
+    st.caption(f"Role: **{role}**")
+
+    if game is None:
+        st.error(
+            "This game no longer exists (server may have restarted or code is invalid)."
+        )
+        if st.button("Back to Home"):
+            st.session_state.game_code = None
+            st.session_state.is_host = False
+            st.session_state.player_name = None
+            st.session_state.player_icon = None
+            st.rerun()
+        return
+
+    if st.button("Leave Game"):
+        st.session_state.game_code = None
+        st.session_state.is_host = False
+        st.session_state.player_name = None
+        st.session_state.player_icon = None
+        st.rerun()
+
+    st.markdown("---")
+
+    if game["status"] == "lobby":
+        show_lobby_view(game_code, is_host, game)
+    else:
+        show_draft_view(game_code, is_host, game)
 
 
 # ---------- Main app routing ----------
