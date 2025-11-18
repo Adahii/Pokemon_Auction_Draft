@@ -8,10 +8,16 @@ import string
 
 st.set_page_config(page_title="Pokémon Auction Draft", layout="wide")
 
-# ---------- Global game store (in-memory, per server) ----------
+# ---------- Shared game store (persists across reruns & sessions) ----------
 
-# code -> game dict
-GAMES = {}
+@st.cache_resource
+def get_game_store():
+    """
+    Returns a shared dict: code -> game_state.
+    This persists across script reruns and is shared by all users
+    on the same Streamlit server.
+    """
+    return {}  # we will mutate this, NOT reassign
 
 
 # ---------- Pokémon helpers ----------
@@ -95,9 +101,10 @@ def pokemon_image_url(name: str) -> str:
 
 def generate_game_code(length: int = 6) -> str:
     chars = string.ascii_uppercase + string.digits
+    games = get_game_store()
     while True:
         code = "".join(random.choice(chars) for _ in range(length))
-        if code not in GAMES:
+        if code not in games:
             return code
 
 
@@ -191,7 +198,8 @@ def show_landing_page():
                 st.error("You need at least 2 players.")
             else:
                 code = generate_game_code()
-                GAMES[code] = create_game(players, starting_budget, max_slots)
+                games = get_game_store()
+                games[code] = create_game(players, starting_budget, max_slots)
 
                 st.session_state.game_code = code
                 st.session_state.is_host = True
@@ -210,19 +218,22 @@ def show_landing_page():
         if join_submit:
             if not join_code:
                 st.error("Enter a game code.")
-            elif join_code not in GAMES:
-                st.error("No game found with that code. Check the code and try again.")
             else:
-                st.session_state.game_code = join_code
-                st.session_state.is_host = False
-                st.success(f"Joined game **{join_code}** as viewer.")
-                st.rerun()
+                games = get_game_store()
+                if join_code not in games:
+                    st.error("No game found with that code. Check the code and try again.")
+                else:
+                    st.session_state.game_code = join_code
+                    st.session_state.is_host = False
+                    st.success(f"Joined game **{join_code}** as viewer.")
+                    st.rerun()
 
 
 # ---------- UI: single game view ----------
 
 def show_game_page(game_code: str, is_host: bool):
-    game = GAMES.get(game_code)
+    games = get_game_store()
+    game = games.get(game_code)
 
     st.title(f"Game Code: {game_code}")
     role = "Host (controls draft)" if is_host else "Viewer (read-only)"
@@ -321,7 +332,10 @@ def show_game_page(game_code: str, is_host: bool):
 
             if not is_host:
                 # VIEWER MODE (read-only)
-                st.info(f"Host is controlling this draft.\n\nCurrent nominator: **{current_nominator}**")
+                st.info(
+                    "Host is controlling this draft.\n\n"
+                    f"Current nominator: **{current_nominator}**"
+                )
 
                 if game["current_pokemon"] is None:
                     st.write("Waiting for host to nominate a Pokémon...")
