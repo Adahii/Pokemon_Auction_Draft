@@ -8,6 +8,17 @@ import string
 import copy
 from streamlit_autorefresh import st_autorefresh
 
+hide_streamlit_style = """
+<style>
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header {visibility: hidden;}
+[data-testid="stToolbar"] {display: none;}
+[data-testid="stStatusWidget"] {display: none;}
+</style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
 st.set_page_config(page_title="Pokémon Auction Draft", layout="wide")
 
 # Auto-refresh every 2 seconds so host/viewers see updates from others
@@ -708,3 +719,4 @@ if st.session_state.game_code is None:
     show_landing_page()
 else:
     show_game_page(st.session_state.game_code, st.session_state.is_host)
+
